@@ -1,0 +1,2 @@
+# Python dependencies (install FFmpeg separately and ensure it is on PATH)
+APScheduler>=3.10.0
