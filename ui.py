@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from zoneinfo import ZoneInfo
@@ -16,15 +16,41 @@ from storage import RecordingStore
 logger = logging.getLogger(__name__)
 
 
-def _parse_schedule_datetime(date_str: str, time_str: str) -> datetime:
-    """Combine local date (YYYY-MM-DD) and time (HH:MM) into timezone-aware datetime."""
+def _local_tz():
+    tz = datetime.now().astimezone().tzinfo
+    return tz if tz is not None else ZoneInfo("UTC")
+
+
+def _to_24h(hour12: int, minute: int, ampm: str) -> tuple[int, int]:
+    """Convert 12-hour clock to 24-hour hour and minute."""
+    ap = ampm.strip().upper()
+    if ap == "AM":
+        h24 = 0 if hour12 == 12 else hour12
+    else:
+        h24 = 12 if hour12 == 12 else hour12 + 12
+    return h24, minute
+
+
+def _datetime_from_date_and_12h(date_str: str, hour12: int, minute: int, ampm: str) -> datetime:
+    """Combine local date with 12h time into timezone-aware datetime."""
+    h24, m = _to_24h(hour12, minute, ampm)
     ds = date_str.strip()
-    ts = time_str.strip()
-    naive = datetime.strptime(f"{ds} {ts}", "%Y-%m-%d %H:%M")
-    local_tz = datetime.now().astimezone().tzinfo
-    if local_tz is None:
-        local_tz = ZoneInfo("UTC")
-    return naive.replace(tzinfo=local_tz)
+    naive = datetime.strptime(f"{ds} {h24:02d}:{m:02d}", "%Y-%m-%d %H:%M")
+    return naive.replace(tzinfo=_local_tz())
+
+
+def _end_datetime_from_start(
+    date_str: str,
+    start: datetime,
+    hour12: int,
+    minute: int,
+    ampm: str,
+) -> datetime:
+    """End time on the given calendar date; if not after start, roll end to the next day."""
+    end_same_day = _datetime_from_date_and_12h(date_str, hour12, minute, ampm)
+    if end_same_day <= start:
+        end_same_day = end_same_day + timedelta(days=1)
+    return end_same_day
 
 
 class SchedulerApp(tk.Tk):
@@ -35,7 +61,7 @@ class SchedulerApp(tk.Tk):
     ) -> None:
         super().__init__()
         self.title("RTSP Recording Scheduler")
-        self.geometry("920x560")
+        self.geometry("920x600")
         self.minsize(800, 480)
 
         self._store = store
@@ -66,28 +92,82 @@ class SchedulerApp(tk.Tk):
         ttk.Label(frm, text="Date (YYYY-MM-DD)").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.var_date = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         ttk.Entry(frm, textvariable=self.var_date, width=14).grid(
-            row=2, column=1, sticky=tk.W, pady=2
+            row=2, column=1, columnspan=3, sticky=tk.W, pady=2
         )
 
-        ttk.Label(frm, text="Start time (HH:MM)").grid(row=2, column=2, sticky=tk.W, padx=(16, 0))
-        self.var_time = tk.StringVar(value=datetime.now().strftime("%H:%M"))
-        ttk.Entry(frm, textvariable=self.var_time, width=8).grid(row=2, column=3, sticky=tk.W)
+        ttk.Label(frm, text="Start time").grid(row=3, column=0, sticky=tk.NW, pady=2)
+        start_row = ttk.Frame(frm)
+        start_row.grid(row=3, column=1, columnspan=3, sticky=tk.W, pady=2)
+        self.var_start_h = tk.StringVar(value="9")
+        self.var_start_m = tk.StringVar(value="0")
+        self.var_start_ampm = tk.StringVar(value="AM")
+        tk.Spinbox(
+            start_row,
+            from_=1,
+            to=12,
+            textvariable=self.var_start_h,
+            width=4,
+            wrap=True,
+        ).pack(side=tk.LEFT)
+        ttk.Label(start_row, text=" : ").pack(side=tk.LEFT)
+        tk.Spinbox(
+            start_row,
+            from_=0,
+            to=59,
+            textvariable=self.var_start_m,
+            width=4,
+            wrap=True,
+        ).pack(side=tk.LEFT)
+        ttk.Label(start_row, text=" ").pack(side=tk.LEFT)
+        ttk.Combobox(
+            start_row,
+            textvariable=self.var_start_ampm,
+            values=("AM", "PM"),
+            width=5,
+            state="readonly",
+        ).pack(side=tk.LEFT)
 
-        ttk.Label(frm, text="Duration (minutes)").grid(row=3, column=0, sticky=tk.W, pady=2)
-        self.var_duration_min = tk.StringVar(value="30")
-        ttk.Entry(frm, textvariable=self.var_duration_min, width=8).grid(
-            row=3, column=1, sticky=tk.W, pady=2
-        )
+        ttk.Label(frm, text="End time").grid(row=4, column=0, sticky=tk.NW, pady=2)
+        end_row = ttk.Frame(frm)
+        end_row.grid(row=4, column=1, columnspan=3, sticky=tk.W, pady=2)
+        self.var_end_h = tk.StringVar(value="10")
+        self.var_end_m = tk.StringVar(value="0")
+        self.var_end_ampm = tk.StringVar(value="AM")
+        tk.Spinbox(
+            end_row,
+            from_=1,
+            to=12,
+            textvariable=self.var_end_h,
+            width=4,
+            wrap=True,
+        ).pack(side=tk.LEFT)
+        ttk.Label(end_row, text=" : ").pack(side=tk.LEFT)
+        tk.Spinbox(
+            end_row,
+            from_=0,
+            to=59,
+            textvariable=self.var_end_m,
+            width=4,
+            wrap=True,
+        ).pack(side=tk.LEFT)
+        ttk.Label(end_row, text=" ").pack(side=tk.LEFT)
+        ttk.Combobox(
+            end_row,
+            textvariable=self.var_end_ampm,
+            values=("AM", "PM"),
+            width=5,
+            state="readonly",
+        ).pack(side=tk.LEFT)
 
-        ttk.Label(frm, text="Output folder").grid(row=4, column=0, sticky=tk.NW, pady=2)
+        ttk.Label(frm, text="Output folder").grid(row=5, column=0, sticky=tk.NW, pady=2)
         out_row = ttk.Frame(frm)
-        out_row.grid(row=4, column=1, columnspan=3, sticky=tk.EW, pady=2)
+        out_row.grid(row=5, column=1, columnspan=3, sticky=tk.EW, pady=2)
         self.var_folder = tk.StringVar(value=str(Path.home() / "Videos" / "rtsp_recordings"))
         ttk.Entry(out_row, textvariable=self.var_folder, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(out_row, text="Browse…", command=self._browse_folder).pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Button(frm, text="Schedule recording", command=self._schedule).grid(
-            row=5, column=1, sticky=tk.W, pady=(8, 0)
+            row=6, column=1, sticky=tk.W, pady=(8, 0)
         )
 
         for c in range(4):
@@ -117,22 +197,36 @@ class SchedulerApp(tk.Tk):
             messagebox.showerror("Validation", "Output folder is required.")
             return
         try:
-            duration_min = int(self.var_duration_min.get().strip())
+            sh = int(self.var_start_h.get().strip())
+            sm = int(self.var_start_m.get().strip())
+            eh = int(self.var_end_h.get().strip())
+            em = int(self.var_end_m.get().strip())
         except ValueError:
-            messagebox.showerror("Validation", "Duration must be a whole number of minutes.")
+            messagebox.showerror("Validation", "Start and end times need valid hour and minute numbers.")
             return
-        if duration_min <= 0:
-            messagebox.showerror("Validation", "Duration must be positive.")
-            return
-        duration_sec = duration_min * 60
-
-        try:
-            when = _parse_schedule_datetime(self.var_date.get(), self.var_time.get())
-        except ValueError:
+        if not (1 <= sh <= 12 and 0 <= sm <= 59 and 1 <= eh <= 12 and 0 <= em <= 59):
             messagebox.showerror(
                 "Validation",
-                "Invalid date or time. Use YYYY-MM-DD and HH:MM (24h).",
+                "Hour must be 1–12 and minutes 0–59.",
             )
+            return
+
+        start_ampm = self.var_start_ampm.get().strip()
+        end_ampm = self.var_end_ampm.get().strip()
+        if start_ampm not in ("AM", "PM") or end_ampm not in ("AM", "PM"):
+            messagebox.showerror("Validation", "Choose AM or PM for start and end.")
+            return
+
+        try:
+            when = _datetime_from_date_and_12h(self.var_date.get(), sh, sm, start_ampm)
+            end_dt = _end_datetime_from_start(self.var_date.get(), when, eh, em, end_ampm)
+        except ValueError:
+            messagebox.showerror("Validation", "Invalid date. Use YYYY-MM-DD.")
+            return
+
+        duration_sec = int((end_dt - when).total_seconds())
+        if duration_sec < 1:
+            messagebox.showerror("Validation", "End time must be after start time.")
             return
 
         now = datetime.now().astimezone()
@@ -163,7 +257,12 @@ class SchedulerApp(tk.Tk):
             duration_sec,
         )
         self.refresh_list()
-        messagebox.showinfo("Scheduled", f"Recording #{rid} scheduled for {when.isoformat()}.")
+        messagebox.showinfo(
+            "Scheduled",
+            f"Recording #{rid} scheduled.\nStart: {when.strftime('%Y-%m-%d %I:%M %p')}\n"
+            f"End: {end_dt.strftime('%Y-%m-%d %I:%M %p')}\n"
+            f"Duration: {duration_sec // 3600}h {(duration_sec % 3600) // 60}m",
+        )
 
     def _build_list(self) -> None:
         outer = ttk.LabelFrame(self, text="Recordings", padding=8)
