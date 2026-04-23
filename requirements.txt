@@ -1,2 +1,4 @@
 # Python dependencies (install FFmpeg separately and ensure it is on PATH)
 APScheduler>=3.10.0
+sv-ttk>=2.6.0
+tkcalendar>=1.6.0

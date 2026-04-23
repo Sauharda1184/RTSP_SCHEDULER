@@ -20,12 +20,21 @@ DEFAULT_H264_CRF = "26"
 DEFAULT_H264_PRESET = "veryfast"
 
 
-def build_output_filename(camera_name: str, scheduled_at) -> str:
-    """cameraName_YYYY-MM-DD_HH-MM.mp4 (camera name sanitized)."""
+def build_output_filename(
+    camera_name: str,
+    scheduled_at,
+    *,
+    multi_stream: bool = False,
+    stream_index: int = 0,
+) -> str:
+    """cameraName_YYYY-MM-DD_HH-MM.mp4; with multi_stream, appends _{stream_index} before .mp4."""
     safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in camera_name.strip())
     safe = safe.strip("_") or "camera"
     ts = scheduled_at.strftime("%Y-%m-%d_%H-%M")
-    return f"{safe}_{ts}.mp4"
+    stem = f"{safe}_{ts}"
+    if multi_stream:
+        stem = f"{stem}_{stream_index}"
+    return f"{stem}.mp4"
 
 
 def record_rtsp(

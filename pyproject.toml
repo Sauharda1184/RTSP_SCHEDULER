@@ -6,5 +6,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "apscheduler>=3.10.0",
-    "ffmpeg>=1.4",
+    "sv-ttk>=2.6.0",
+    "tkcalendar>=1.6.0",
 ]

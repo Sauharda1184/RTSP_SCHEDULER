@@ -6,7 +6,7 @@ import logging
 import tkinter as tk
 from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from zoneinfo import ZoneInfo
 
 from recorder import ffmpeg_available
@@ -15,6 +15,21 @@ from storage import RecordingStore
 
 logger = logging.getLogger(__name__)
 
+try:
+    import sv_ttk
+
+    _HAS_SV_TTK = True
+except ImportError:
+    _HAS_SV_TTK = False
+
+try:
+    from tkcalendar import DateEntry
+
+    _HAS_TKCALENDAR = True
+except ImportError:
+    _HAS_TKCALENDAR = False
+    DateEntry = None  # type: ignore[misc, assignment]
+
 
 def _local_tz():
     tz = datetime.now().astimezone().tzinfo
@@ -22,7 +37,6 @@ def _local_tz():
 
 
 def _to_24h(hour12: int, minute: int, ampm: str) -> tuple[int, int]:
-    """Convert 12-hour clock to 24-hour hour and minute."""
     ap = ampm.strip().upper()
     if ap == "AM":
         h24 = 0 if hour12 == 12 else hour12
@@ -32,7 +46,6 @@ def _to_24h(hour12: int, minute: int, ampm: str) -> tuple[int, int]:
 
 
 def _datetime_from_date_and_12h(date_str: str, hour12: int, minute: int, ampm: str) -> datetime:
-    """Combine local date with 12h time into timezone-aware datetime."""
     h24, m = _to_24h(hour12, minute, ampm)
     ds = date_str.strip()
     naive = datetime.strptime(f"{ds} {h24:02d}:{m:02d}", "%Y-%m-%d %H:%M")
@@ -46,7 +59,6 @@ def _end_datetime_from_start(
     minute: int,
     ampm: str,
 ) -> datetime:
-    """End time on the given calendar date; if not after start, roll end to the next day."""
     end_same_day = _datetime_from_date_and_12h(date_str, hour12, minute, ampm)
     if end_same_day <= start:
         end_same_day = end_same_day + timedelta(days=1)
@@ -60,44 +72,191 @@ class SchedulerApp(tk.Tk):
         scheduler: SchedulerService,
     ) -> None:
         super().__init__()
+        if _HAS_SV_TTK:
+            sv_ttk.set_theme("dark")
         self.title("RTSP Recording Scheduler")
-        self.geometry("980x620")
-        self.minsize(800, 480)
+        self.geometry("1020x720")
+        self.minsize(880, 600)
 
         self._store = store
         self._scheduler = scheduler
+        self._stream_rows: list[dict[str, tk.Widget | tk.StringVar]] = []
+        self._date_entry: tk.Widget | None = None
 
+        self._build_presets_bar()
         self._build_form()
         self._build_list()
         self._build_actions()
         self._maybe_warn_ffmpeg()
         self.refresh_list()
 
+    def _build_presets_bar(self) -> None:
+        pf = ttk.LabelFrame(self, text="Presets", padding=6)
+        pf.pack(fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Label(pf, text="Saved layout").pack(side=tk.LEFT, padx=(0, 6))
+        self.var_preset_pick = tk.StringVar()
+        self.preset_combo = ttk.Combobox(
+            pf,
+            textvariable=self.var_preset_pick,
+            width=28,
+            state="readonly",
+        )
+        self.preset_combo.pack(side=tk.LEFT, padx=4)
+        ttk.Button(pf, text="Load", command=self._preset_load).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pf, text="Save as…", command=self._preset_save).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pf, text="Delete", command=self._preset_delete).pack(side=tk.LEFT, padx=2)
+        self._refresh_preset_names()
+
+    def _refresh_preset_names(self) -> None:
+        names = self._store.list_preset_names()
+        self.preset_combo["values"] = names
+        if names and self.var_preset_pick.get() not in names:
+            self.var_preset_pick.set("")
+
+    def _preset_load(self) -> None:
+        name = self.var_preset_pick.get().strip()
+        if not name:
+            messagebox.showinfo("Presets", "Choose a preset from the list.")
+            return
+        data = self._store.get_preset(name)
+        if not data:
+            messagebox.showerror("Presets", f"Preset “{name}” not found.")
+            self._refresh_preset_names()
+            return
+        streams, folder, compress = data
+        self._clear_stream_rows()
+        for url, cam in streams:
+            self._add_stream_row(url, cam)
+        if not self._stream_rows:
+            self._add_stream_row("", "traffic_cam")
+        self.var_folder.set(folder)
+        self.var_compress.set(compress)
+        messagebox.showinfo("Presets", f"Loaded preset “{name}”.")
+
+    def _preset_save(self) -> None:
+        try:
+            streams = self._collect_stream_pairs()
+        except ValueError as e:
+            messagebox.showerror("Presets", str(e))
+            return
+        name = simpledialog.askstring("Save preset", "Preset name:", parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self._store.save_preset(
+            name,
+            streams,
+            self.var_folder.get().strip(),
+            self.var_compress.get(),
+        )
+        self._refresh_preset_names()
+        self.var_preset_pick.set(name)
+        messagebox.showinfo("Presets", f"Saved preset “{name}”.")
+
+    def _preset_delete(self) -> None:
+        name = self.var_preset_pick.get().strip()
+        if not name:
+            messagebox.showinfo("Presets", "Choose a preset to delete.")
+            return
+        if not messagebox.askyesno("Delete preset", f"Delete preset “{name}”?"):
+            return
+        if self._store.delete_preset(name):
+            self._refresh_preset_names()
+            self.var_preset_pick.set("")
+            messagebox.showinfo("Presets", "Preset deleted.")
+        else:
+            messagebox.showerror("Presets", "Could not delete preset.")
+
+    def _clear_stream_rows(self) -> None:
+        for item in self._stream_rows:
+            item["frame"].destroy()
+        self._stream_rows.clear()
+
+    def _add_stream_row(self, url: str = "", camera: str = "traffic_cam") -> None:
+        host = self._streams_host
+        rowf = ttk.Frame(host)
+        rowf.pack(fill=tk.X, pady=2)
+        var_u = tk.StringVar(value=url)
+        var_n = tk.StringVar(value=camera)
+        ttk.Entry(rowf, textvariable=var_u, width=62).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(rowf, text="Name").pack(side=tk.LEFT)
+        ttk.Entry(rowf, textvariable=var_n, width=16).pack(side=tk.LEFT, padx=6)
+
+        def remove() -> None:
+            if len(self._stream_rows) <= 1:
+                messagebox.showinfo("Cameras", "At least one camera row is required.")
+                return
+            rowf.destroy()
+            self._stream_rows[:] = [x for x in self._stream_rows if x["frame"] is not rowf]
+
+        ttk.Button(rowf, text="Remove", width=8, command=remove).pack(side=tk.LEFT, padx=4)
+        self._stream_rows.append({"frame": rowf, "url": var_u, "name": var_n})
+
+    def _collect_stream_pairs(self) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        for item in self._stream_rows:
+            u = item["url"].get().strip()  # type: ignore[union-attr]
+            n = item["name"].get().strip() or "camera"  # type: ignore[union-attr]
+            if u:
+                pairs.append((u, n))
+        if not pairs:
+            raise ValueError("At least one RTSP URL is required.")
+        return pairs
+
+    def _schedule_date_str(self) -> str:
+        if self._date_entry is not None and _HAS_TKCALENDAR:
+            d = self._date_entry.get_date()  # type: ignore[union-attr]
+            return d.strftime("%Y-%m-%d")
+        return self.var_date.get().strip()
+
+    def _sync_calendar_from_var(self) -> None:
+        if self._date_entry is None or not _HAS_TKCALENDAR:
+            return
+        try:
+            d = datetime.strptime(self.var_date.get().strip(), "%Y-%m-%d").date()
+            self._date_entry.set_date(d)  # type: ignore[union-attr]
+        except ValueError:
+            pass
+
     def _build_form(self) -> None:
         frm = ttk.LabelFrame(self, text="New recording", padding=8)
         frm.pack(fill=tk.X, padx=8, pady=8)
 
-        ttk.Label(frm, text="RTSP URL").grid(row=0, column=0, sticky=tk.W, pady=2)
-        self.var_url = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.var_url, width=72).grid(
-            row=0, column=1, columnspan=3, sticky=tk.EW, pady=2
-        )
+        cam_lf = ttk.LabelFrame(frm, text="Cameras (recorded concurrently, max parallel capped)", padding=6)
+        cam_lf.grid(row=0, column=0, columnspan=4, sticky=tk.EW, pady=(0, 6))
+        self._streams_host = ttk.Frame(cam_lf)
+        self._streams_host.pack(fill=tk.X)
+        ttk.Button(cam_lf, text="+ Add camera", command=self._add_stream_row).pack(anchor=tk.W, pady=4)
+        self._add_stream_row("", "traffic_cam")
 
-        ttk.Label(frm, text="Camera name").grid(row=1, column=0, sticky=tk.W, pady=2)
-        self.var_camera = tk.StringVar(value="traffic_cam")
-        ttk.Entry(frm, textvariable=self.var_camera, width=32).grid(
-            row=1, column=1, sticky=tk.W, pady=2
-        )
-
-        ttk.Label(frm, text="Date (YYYY-MM-DD)").grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Label(frm, text="Date").grid(row=1, column=0, sticky=tk.W, pady=2)
+        date_row = ttk.Frame(frm)
+        date_row.grid(row=1, column=1, columnspan=3, sticky=tk.W, pady=2)
         self.var_date = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-        ttk.Entry(frm, textvariable=self.var_date, width=14).grid(
-            row=2, column=1, columnspan=3, sticky=tk.W, pady=2
-        )
+        if _HAS_TKCALENDAR and DateEntry is not None:
+            self._date_entry = DateEntry(
+                date_row,
+                width=12,
+                date_pattern="yyyy-MM-dd",
+            )
+            self._date_entry.pack(side=tk.LEFT)  # type: ignore[union-attr]
+            self._sync_calendar_from_var()
 
-        ttk.Label(frm, text="Start time").grid(row=3, column=0, sticky=tk.NW, pady=2)
+            def _on_cal(_event=None) -> None:
+                self.var_date.set(self._schedule_date_str())
+
+            self._date_entry.bind("<<DateEntrySelected>>", _on_cal)  # type: ignore[union-attr]
+        else:
+            ttk.Entry(date_row, textvariable=self.var_date, width=14).pack(side=tk.LEFT)
+            ttk.Label(
+                date_row,
+                text="(YYYY-MM-DD — install tkcalendar for a date picker)",
+                foreground="gray",
+            ).pack(side=tk.LEFT, padx=8)
+
+        ttk.Label(frm, text="Start time").grid(row=2, column=0, sticky=tk.NW, pady=2)
         start_row = ttk.Frame(frm)
-        start_row.grid(row=3, column=1, columnspan=3, sticky=tk.W, pady=2)
+        start_row.grid(row=2, column=1, columnspan=3, sticky=tk.W, pady=2)
         self.var_start_h = tk.StringVar(value="9")
         self.var_start_m = tk.StringVar(value="0")
         self.var_start_ampm = tk.StringVar(value="AM")
@@ -127,9 +286,9 @@ class SchedulerApp(tk.Tk):
             state="readonly",
         ).pack(side=tk.LEFT)
 
-        ttk.Label(frm, text="End time").grid(row=4, column=0, sticky=tk.NW, pady=2)
+        ttk.Label(frm, text="End time").grid(row=3, column=0, sticky=tk.NW, pady=2)
         end_row = ttk.Frame(frm)
-        end_row.grid(row=4, column=1, columnspan=3, sticky=tk.W, pady=2)
+        end_row.grid(row=3, column=1, columnspan=3, sticky=tk.W, pady=2)
         self.var_end_h = tk.StringVar(value="10")
         self.var_end_m = tk.StringVar(value="0")
         self.var_end_ampm = tk.StringVar(value="AM")
@@ -158,6 +317,16 @@ class SchedulerApp(tk.Tk):
             width=5,
             state="readonly",
         ).pack(side=tk.LEFT)
+
+        ttk.Label(
+            frm,
+            text=(
+                "Tip: If end clock time is earlier than start on the same calendar date, "
+                "the end is treated as the next day (overnight recording)."
+            ),
+            wraplength=760,
+            foreground="gray",
+        ).grid(row=4, column=1, columnspan=3, sticky=tk.W, pady=(0, 4))
 
         ttk.Label(frm, text="Output folder").grid(row=5, column=0, sticky=tk.NW, pady=2)
         out_row = ttk.Frame(frm)
@@ -194,11 +363,11 @@ class SchedulerApp(tk.Tk):
             )
 
     def _schedule(self) -> None:
-        url = self.var_url.get().strip()
-        if not url:
-            messagebox.showerror("Validation", "RTSP URL is required.")
+        try:
+            stream_pairs = self._collect_stream_pairs()
+        except ValueError as e:
+            messagebox.showerror("Validation", str(e))
             return
-        camera = self.var_camera.get().strip() or "camera"
         folder = self.var_folder.get().strip()
         if not folder:
             messagebox.showerror("Validation", "Output folder is required.")
@@ -224,9 +393,10 @@ class SchedulerApp(tk.Tk):
             messagebox.showerror("Validation", "Choose AM or PM for start and end.")
             return
 
+        date_part = self._schedule_date_str()
         try:
-            when = _datetime_from_date_and_12h(self.var_date.get(), sh, sm, start_ampm)
-            end_dt = _end_datetime_from_start(self.var_date.get(), when, eh, em, end_ampm)
+            when = _datetime_from_date_and_12h(date_part, sh, sm, start_ampm)
+            end_dt = _end_datetime_from_start(date_part, when, eh, em, end_ampm)
         except ValueError:
             messagebox.showerror("Validation", "Invalid date. Use YYYY-MM-DD.")
             return
@@ -250,8 +420,7 @@ class SchedulerApp(tk.Tk):
 
         compress = self.var_compress.get()
         rid = self._store.add_recording(
-            camera_name=camera,
-            rtsp_url=url,
+            streams=stream_pairs,
             scheduled_at=when,
             duration_seconds=duration_sec,
             output_folder=str(out_path.resolve()),
@@ -259,20 +428,21 @@ class SchedulerApp(tk.Tk):
         )
         self._scheduler.schedule_recording(rid, when)
         logger.info(
-            "Scheduled recording id=%s camera=%s at=%s duration=%ss",
+            "Scheduled recording id=%s streams=%s at=%s duration=%ss",
             rid,
-            camera,
+            len(stream_pairs),
             when.isoformat(),
             duration_sec,
         )
         self.refresh_list()
         enc_note = "\nOutput: H.264 re-encode (smaller file)." if compress else "\nOutput: stream copy (original size)."
+        multi_note = f"\n{len(stream_pairs)} cameras will record in parallel (up to the app limit)."
         messagebox.showinfo(
             "Scheduled",
             f"Recording #{rid} scheduled.\nStart: {when.strftime('%Y-%m-%d %I:%M %p')}\n"
             f"End: {end_dt.strftime('%Y-%m-%d %I:%M %p')}\n"
             f"Duration: {duration_sec // 3600}h {(duration_sec % 3600) // 60}m"
-            f"{enc_note}",
+            f"{enc_note}{multi_note}",
         )
 
     def _build_list(self) -> None:
@@ -280,10 +450,10 @@ class SchedulerApp(tk.Tk):
         outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
         cols = ("id", "camera", "scheduled", "duration", "compress", "status", "detail")
-        self.tree = ttk.Treeview(outer, columns=cols, show="headings", height=14)
+        self.tree = ttk.Treeview(outer, columns=cols, show="headings", height=12)
         headings = {
             "id": "ID",
-            "camera": "Camera",
+            "camera": "Camera(s)",
             "scheduled": "Scheduled (local)",
             "duration": "Duration",
             "compress": "H.264",
@@ -291,13 +461,13 @@ class SchedulerApp(tk.Tk):
             "detail": "Output / error",
         }
         widths = {
-            "id": 48,
-            "camera": 120,
-            "scheduled": 180,
-            "duration": 90,
-            "compress": 52,
-            "status": 100,
-            "detail": 280,
+            "id": 44,
+            "camera": 160,
+            "scheduled": 160,
+            "duration": 80,
+            "compress": 48,
+            "status": 96,
+            "detail": 260,
         }
         for c in cols:
             self.tree.heading(c, text=headings[c])
@@ -376,6 +546,7 @@ class SchedulerApp(tk.Tk):
             else:
                 dur = f"{ds}s"
             enc = "Yes" if row.compress else ""
+            cam = row.display_cameras or row.camera_name
             detail = row.output_path or (row.error_message or "") or ""
             if len(detail) > 80:
                 detail = detail[:77] + "..."
@@ -383,11 +554,10 @@ class SchedulerApp(tk.Tk):
             self.tree.insert(
                 "",
                 tk.END,
-                values=(row.id, row.camera_name, sched, dur, enc, status_display, detail),
+                values=(row.id, cam, sched, dur, enc, status_display, detail),
             )
 
     def on_job_finished(self, recording_id: int) -> None:
-        """Called from scheduler thread; marshal to UI thread."""
         self.after(0, self._on_job_finished_ui, recording_id)
 
     def _on_job_finished_ui(self, recording_id: int) -> None:
