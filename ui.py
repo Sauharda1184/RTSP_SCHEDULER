@@ -61,7 +61,7 @@ class SchedulerApp(tk.Tk):
     ) -> None:
         super().__init__()
         self.title("RTSP Recording Scheduler")
-        self.geometry("920x600")
+        self.geometry("980x620")
         self.minsize(800, 480)
 
         self._store = store
@@ -166,8 +166,15 @@ class SchedulerApp(tk.Tk):
         ttk.Entry(out_row, textvariable=self.var_folder, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(out_row, text="Browse…", command=self._browse_folder).pack(side=tk.LEFT, padx=(8, 0))
 
+        self.var_compress = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm,
+            text="Compress to H.264 (smaller files, uses more CPU — must encode in real time)",
+            variable=self.var_compress,
+        ).grid(row=6, column=1, columnspan=3, sticky=tk.W, pady=(4, 0))
+
         ttk.Button(frm, text="Schedule recording", command=self._schedule).grid(
-            row=6, column=1, sticky=tk.W, pady=(8, 0)
+            row=7, column=1, sticky=tk.W, pady=(8, 0)
         )
 
         for c in range(4):
@@ -241,12 +248,14 @@ class SchedulerApp(tk.Tk):
             messagebox.showerror("Output folder", f"Cannot create output folder: {e}")
             return
 
+        compress = self.var_compress.get()
         rid = self._store.add_recording(
             camera_name=camera,
             rtsp_url=url,
             scheduled_at=when,
             duration_seconds=duration_sec,
             output_folder=str(out_path.resolve()),
+            compress=compress,
         )
         self._scheduler.schedule_recording(rid, when)
         logger.info(
@@ -257,28 +266,39 @@ class SchedulerApp(tk.Tk):
             duration_sec,
         )
         self.refresh_list()
+        enc_note = "\nOutput: H.264 re-encode (smaller file)." if compress else "\nOutput: stream copy (original size)."
         messagebox.showinfo(
             "Scheduled",
             f"Recording #{rid} scheduled.\nStart: {when.strftime('%Y-%m-%d %I:%M %p')}\n"
             f"End: {end_dt.strftime('%Y-%m-%d %I:%M %p')}\n"
-            f"Duration: {duration_sec // 3600}h {(duration_sec % 3600) // 60}m",
+            f"Duration: {duration_sec // 3600}h {(duration_sec % 3600) // 60}m"
+            f"{enc_note}",
         )
 
     def _build_list(self) -> None:
         outer = ttk.LabelFrame(self, text="Recordings", padding=8)
         outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        cols = ("id", "camera", "scheduled", "duration", "status", "detail")
+        cols = ("id", "camera", "scheduled", "duration", "compress", "status", "detail")
         self.tree = ttk.Treeview(outer, columns=cols, show="headings", height=14)
         headings = {
             "id": "ID",
             "camera": "Camera",
             "scheduled": "Scheduled (local)",
             "duration": "Duration",
+            "compress": "H.264",
             "status": "Status",
             "detail": "Output / error",
         }
-        widths = {"id": 48, "camera": 120, "scheduled": 180, "duration": 90, "status": 100, "detail": 320}
+        widths = {
+            "id": 48,
+            "camera": 120,
+            "scheduled": 180,
+            "duration": 90,
+            "compress": 52,
+            "status": 100,
+            "detail": 280,
+        }
         for c in cols:
             self.tree.heading(c, text=headings[c])
             self.tree.column(c, width=widths[c], stretch=c == "detail")
@@ -348,14 +368,22 @@ class SchedulerApp(tk.Tk):
             self.tree.delete(i)
         for row in self._store.list_recent(200):
             sched = row.scheduled_at.strftime("%Y-%m-%d %H:%M %Z")
-            dur = f"{row.duration_seconds // 60}m" if row.duration_seconds % 60 == 0 else f"{row.duration_seconds}s"
+            ds = row.duration_seconds
+            if ds >= 3600:
+                dur = f"{ds // 3600}h {(ds % 3600) // 60}m"
+            elif ds % 60 == 0:
+                dur = f"{ds // 60}m"
+            else:
+                dur = f"{ds}s"
+            enc = "Yes" if row.compress else ""
             detail = row.output_path or (row.error_message or "") or ""
             if len(detail) > 80:
                 detail = detail[:77] + "..."
+            status_display = row.status.replace("_", " ").title()
             self.tree.insert(
                 "",
                 tk.END,
-                values=(row.id, row.camera_name, sched, dur, row.status, detail),
+                values=(row.id, row.camera_name, sched, dur, enc, status_display, detail),
             )
 
     def on_job_finished(self, recording_id: int) -> None:

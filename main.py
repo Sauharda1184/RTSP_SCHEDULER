@@ -42,12 +42,16 @@ def main() -> None:
     store = RecordingStore(db_path)
     app_holder: list[SchedulerApp | None] = [None]
 
-    def on_job_finished(recording_id: int) -> None:
+    def refresh_ui(recording_id: int) -> None:
         app = app_holder[0]
         if app is not None:
             app.on_job_finished(recording_id)
 
-    scheduler = SchedulerService(store, on_job_finished=on_job_finished)
+    scheduler = SchedulerService(
+        store,
+        on_job_started=refresh_ui,
+        on_job_finished=refresh_ui,
+    )
     scheduler.start()
 
     app = SchedulerApp(store, scheduler)

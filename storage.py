@@ -21,6 +21,7 @@ class RecordingRow:
     created_at: datetime
     output_path: str | None
     error_message: str | None
+    compress: bool
 
 
 def _parse_dt(value: str) -> datetime:
@@ -56,6 +57,14 @@ class RecordingStore:
                 )
                 """
             )
+            conn.execute(
+                "UPDATE recordings SET status = 'recording' WHERE status = 'running'"
+            )
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(recordings)").fetchall()}
+            if "compress" not in cols:
+                conn.execute(
+                    "ALTER TABLE recordings ADD COLUMN compress INTEGER NOT NULL DEFAULT 0"
+                )
 
     def add_recording(
         self,
@@ -65,6 +74,7 @@ class RecordingStore:
         scheduled_at: datetime,
         duration_seconds: int,
         output_folder: str,
+        compress: bool = False,
     ) -> int:
         now = datetime.now().astimezone()
         with self._connect() as conn:
@@ -72,8 +82,8 @@ class RecordingStore:
                 """
                 INSERT INTO recordings (
                     camera_name, rtsp_url, scheduled_at, duration_seconds,
-                    output_folder, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                    output_folder, status, created_at, compress
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
                 """,
                 (
                     camera_name.strip(),
@@ -82,6 +92,7 @@ class RecordingStore:
                     duration_seconds,
                     output_folder,
                     now.isoformat(),
+                    1 if compress else 0,
                 ),
             )
             return int(cur.lastrowid)
@@ -107,11 +118,27 @@ class RecordingStore:
         return [self._row_to_model(r) for r in rows]
 
     def list_recent(self, limit: int = 100) -> list[RecordingRow]:
+        """Active jobs (pending/recording) first, soonest first; then others by latest scheduled."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM recordings
-                ORDER BY scheduled_at DESC
+                ORDER BY
+                  CASE status
+                    WHEN 'pending' THEN 0
+                    WHEN 'recording' THEN 0
+                    WHEN 'running' THEN 0
+                    WHEN 'completed' THEN 1
+                    WHEN 'failed' THEN 1
+                    WHEN 'missed' THEN 2
+                    WHEN 'cancelled' THEN 2
+                    ELSE 3
+                  END,
+                  CASE
+                    WHEN status IN ('pending', 'recording', 'running')
+                    THEN scheduled_at
+                  END ASC,
+                  scheduled_at DESC
                 LIMIT ?
                 """,
                 (limit,),
@@ -180,4 +207,5 @@ class RecordingStore:
             created_at=_parse_dt(d["created_at"]),
             output_path=d["output_path"],
             error_message=d["error_message"],
+            compress=bool(d.get("compress", 0)),
         )

@@ -31,9 +31,11 @@ class SchedulerService:
         store: RecordingStore,
         *,
         on_job_finished: JobCallback | None = None,
+        on_job_started: JobCallback | None = None,
     ) -> None:
         self._store = store
         self._on_job_finished = on_job_finished
+        self._on_job_started = on_job_started
         self._scheduler = BackgroundScheduler()
         self._lock = threading.Lock()
 
@@ -94,7 +96,8 @@ class SchedulerService:
             self._notify_finished(recording_id)
             return
 
-        self._store.update_status(recording_id, "running")
+        self._store.update_status(recording_id, "recording")
+        self._notify_started(recording_id)
         out_name = build_output_filename(row.camera_name, row.scheduled_at)
         out_path = Path(row.output_folder) / out_name
 
@@ -103,6 +106,7 @@ class SchedulerService:
                 rtsp_url=row.rtsp_url,
                 duration_seconds=row.duration_seconds,
                 output_file=out_path,
+                compress=row.compress,
             )
         except subprocess.TimeoutExpired as e:
             err = f"FFmpeg timeout: {e}"
@@ -127,6 +131,13 @@ class SchedulerService:
             self._store.update_status(recording_id, "failed", error_message=err)
 
         self._notify_finished(recording_id)
+
+    def _notify_started(self, recording_id: int) -> None:
+        if self._on_job_started:
+            try:
+                self._on_job_started(recording_id)
+            except Exception:
+                logger.exception("on_job_started callback failed")
 
     def _notify_finished(self, recording_id: int) -> None:
         if self._on_job_finished:
